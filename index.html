@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>하늘을 나는 자동차</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#0b1530;font-family:"Malgun Gothic",sans-serif;color:#fff}
+  canvas{display:block}
+  #hud{position:fixed;left:0;right:0;top:0;padding:14px 20px;display:flex;gap:28px;font-size:20px;text-shadow:0 2px 6px #000;pointer-events:none}
+  #hud b{color:#7fe3ff}
+  #arrow{position:fixed;left:50%;top:90px;width:60px;height:60px;margin-left:-30px;pointer-events:none;transition:opacity .2s}
+  #arrow svg{width:100%;height:100%;filter:drop-shadow(0 0 6px #ffd54a)}
+  #msg{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(5,10,30,.72);text-align:center;line-height:1.7}
+  #msg h1{font-size:44px;margin:0 0 10px}
+  #msg p{margin:4px 0;font-size:18px;color:#cfe}
+  #msg button{margin-top:18px;font-size:22px;padding:10px 34px;border:0;border-radius:10px;background:#ffd54a;cursor:pointer;font-weight:bold}
+  #flash{position:fixed;inset:0;background:red;opacity:0;pointer-events:none;transition:opacity .4s}
+  #bars{position:fixed;left:20px;bottom:18px;font-size:16px;text-shadow:0 2px 6px #000;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="hud">
+  <div>점수 <b id="score">0</b></div>
+  <div>남은 시간 <b id="time">60</b>초</div>
+  <div>속도 <b id="speed">0</b> km/h</div>
+  <div>고도 <b id="alt">0</b> m</div>
+</div>
+<div id="arrow"><svg viewBox="0 0 24 24"><path d="M12 2 L21 20 L12 15 L3 20 Z" fill="#ffd54a"/></svg></div>
+<div id="flash"></div>
+<div id="bars">W/S 기수 내리기/올리기 · A/D 좌/우 선회 · Shift 부스트 · Space 감속 · R 재시작</div>
+<div id="msg">
+  <h1>🚗 하늘을 나는 자동차</h1>
+  <p>노란 링을 통과해서 점수와 시간을 얻으세요!</p>
+  <p>건물이나 땅에 부딪치면 시간이 줄어듭니다.</p>
+  <p><b>W / S</b> 위아래 &nbsp; <b>A / D</b> 좌우 선회 &nbsp; <b>Shift</b> 부스트 &nbsp; <b>Space</b> 감속</p>
+  <button id="start">게임 시작</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+  // ---------- 기본 설정 ----------
+  const scene = new THREE.Scene();
+  const SKY = 0x7ec8ff;
+  scene.background = new THREE.Color(SKY);
+  scene.fog = new THREE.Fog(SKY, 150, 900);
+
+  const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.5, 2000);
+  const renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  document.body.appendChild(renderer.domElement);
+  addEventListener('resize', ()=>{
+    camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x446688, 0.9));
+  const sun = new THREE.DirectionalLight(0xfff2cc, 0.9);
+  sun.position.set(200, 400, 100);
+  scene.add(sun);
+
+  // ---------- 도시 ----------
+  const AREA = 700;
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(AREA*3, AREA*3),
+    new THREE.MeshLambertMaterial({color:0x35563a})
+  );
+  ground.rotation.x = -Math.PI/2;
+  scene.add(ground);
+  const grid = new THREE.GridHelper(AREA*3, 90, 0x55775a, 0x466a4b);
+  grid.position.y = 0.05;
+  scene.add(grid);
+
+  const buildings = []; // {minX,maxX,minZ,maxZ,h}
+  const bColors = [0x8899aa,0x99a3b5,0x7a8798,0xa8b0bd,0x6f7f95,0xb5a99a];
+  for (let i=0;i<260;i++){
+    const w = 14 + Math.random()*30, d = 14 + Math.random()*30;
+    const h = 15 + Math.pow(Math.random(),2)*150;
+    const x = (Math.random()-0.5)*AREA*2, z = (Math.random()-0.5)*AREA*2;
+    if (Math.abs(x) < 50 && Math.abs(z) < 50) continue; // 출발 지점은 비워둠
+    const m = new THREE.Mesh(
+      new THREE.BoxGeometry(w,h,d),
+      new THREE.MeshLambertMaterial({color:bColors[i%bColors.length]})
+    );
+    m.position.set(x,h/2,z);
+    scene.add(m);
+    // 창문 느낌의 윗면 띠
+    const roof = new THREE.Mesh(new THREE.BoxGeometry(w+0.6,1.2,d+0.6), new THREE.MeshLambertMaterial({color:0x44505e}));
+    roof.position.set(x,h+0.6,z);
+    scene.add(roof);
+    buildings.push({minX:x-w/2,maxX:x+w/2,minZ:z-d/2,maxZ:z+d/2,h:h+1.2});
+  }
+
+  // 구름
+  const cloudMat = new THREE.MeshLambertMaterial({color:0xffffff,transparent:true,opacity:0.85,fog:false});
+  for (let i=0;i<50;i++){
+    const g = new THREE.Group();
+    const n = 3+Math.floor(Math.random()*4);
+    for (let j=0;j<n;j++){
+      const s = new THREE.Mesh(new THREE.SphereGeometry(12+Math.random()*14,10,8), cloudMat);
+      s.position.set(j*16-n*8, Math.random()*6, Math.random()*10);
+      s.scale.y = 0.55;
+      g.add(s);
+    }
+    g.position.set((Math.random()-0.5)*AREA*3, 220+Math.random()*120, (Math.random()-0.5)*AREA*3);
+    scene.add(g);
+  }
+
+  // ---------- 자동차 ----------
+  const car = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(2.2,0.8,5), new THREE.MeshPhongMaterial({color:0xe53935,shininess:80}));
+  car.add(body);
+  const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.8,0.7,2.2), new THREE.MeshPhongMaterial({color:0x9fd8ff,shininess:120,transparent:true,opacity:0.85}));
+  cabin.position.set(0,0.7,0.2); car.add(cabin);
+  const nose = new THREE.Mesh(new THREE.BoxGeometry(2.0,0.4,1.2), new THREE.MeshPhongMaterial({color:0xb71c1c}));
+  nose.position.set(0,-0.05,-2.8); car.add(nose);
+  const wingMat = new THREE.MeshPhongMaterial({color:0xffffff});
+  const wing = new THREE.Mesh(new THREE.BoxGeometry(6.4,0.12,1.4), wingMat);
+  wing.position.set(0,0.1,0.6); car.add(wing);
+  const tail = new THREE.Mesh(new THREE.BoxGeometry(0.15,0.9,0.9), wingMat);
+  tail.position.set(0,0.7,2.3); car.add(tail);
+  const tailW = new THREE.Mesh(new THREE.BoxGeometry(2.6,0.1,0.7), wingMat);
+  tailW.position.set(0,1.1,2.3); car.add(tailW);
+  const wheelGeo = new THREE.CylinderGeometry(0.5,0.5,0.4,14);
+  const wheelMat = new THREE.MeshLambertMaterial({color:0x222222});
+  [[-1.2,-1.6],[1.2,-1.6],[-1.2,1.6],[1.2,1.6]].forEach(([x,z])=>{
+    const w = new THREE.Mesh(wheelGeo, wheelMat);
+    w.rotation.z = Math.PI/2; w.position.set(x,-0.45,z); car.add(w);
+  });
+  const flameMat = new THREE.MeshBasicMaterial({color:0x66ddff});
+  const flames = [-0.7,0.7].map(x=>{
+    const f = new THREE.Mesh(new THREE.ConeGeometry(0.35,2,10), flameMat);
+    f.rotation.x = -Math.PI/2; // 꼭짓점이 뒤(+Z)쪽
+    f.position.set(x,0,3.4); car.add(f);
+    return f;
+  });
+  const headL = new THREE.PointLight(0xffffff,0.6,40); headL.position.set(0,0,-4); car.add(headL);
+  scene.add(car);
+
+  // ---------- 링 ----------
+  const RING_R = 9;
+  const rings = [];
+  const ringGeo = new THREE.TorusGeometry(RING_R, 0.9, 12, 40);
+  const dimMat = new THREE.MeshBasicMaterial({color:0x88aacc,transparent:true,opacity:0.45});
+  const hotMat = new THREE.MeshBasicMaterial({color:0xffd54a});
+  function freeSpot(){
+    for (let t=0;t<200;t++){
+      const x = (Math.random()-0.5)*AREA*1.6, z = (Math.random()-0.5)*AREA*1.6;
+      const y = 30 + Math.random()*110;
+      let ok = true;
+      for (const b of buildings){
+        if (x>b.minX-RING_R-4 && x<b.maxX+RING_R+4 && z>b.minZ-RING_R-4 && z<b.maxZ+RING_R+4 && y-RING_R-3 < b.h){ ok=false; break; }
+      }
+      if (ok) return new THREE.Vector3(x,y,z);
+    }
+    return new THREE.Vector3(0,150,-200);
+  }
+  function makeRing(){
+    const r = new THREE.Mesh(ringGeo, dimMat);
+    r.position.copy(freeSpot());
+    r.rotation.y = Math.random()*Math.PI;
+    scene.add(r);
+    return r;
+  }
+  for (let i=0;i<8;i++) rings.push(makeRing());
+
+  // ---------- 상태 ----------
+  const keys = {};
+  addEventListener('keydown', e=>{ keys[e.code]=true; if(e.code==='Space') e.preventDefault(); if(e.code==='KeyR') reset(); });
+  addEventListener('keyup',   e=>{ keys[e.code]=false; });
+
+  let yaw=0, pitch=0, roll=0, speed=45;
+  let score=0, timeLeft=60, running=false, over=false, invuln=0;
+  const pos = new THREE.Vector3(0,40,0);
+  const $ = id=>document.getElementById(id);
+  const msg=$('msg'), flash=$('flash');
+
+  function reset(){
+    yaw=0;pitch=0;roll=0;speed=45;score=0;timeLeft=60;over=false;invuln=2;
+    pos.set(0,40,0);
+    rings.forEach(r=>{ r.position.copy(freeSpot()); });
+    if (running) msg.style.display='none';
+  }
+  $('start').onclick = ()=>{ running=true; reset(); };
+
+  function crash(why){
+    if (invuln>0) return;
+    timeLeft -= 5; invuln = 1.5;
+    flash.style.opacity = 0.55; setTimeout(()=>flash.style.opacity=0, 250);
+    const fwd = new THREE.Vector3(-Math.sin(yaw)*Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw)*Math.cos(pitch));
+    pos.addScaledVector(fwd, -10);
+    pos.y = Math.max(pos.y+6, 8);
+    pitch = 0.2; speed = 35;
+  }
+
+  // ---------- 메인 루프 ----------
+  const clock = new THREE.Clock();
+  const tmp = new THREE.Vector3();
+  let target = 0;
+  function pickTarget(){
+    let best=0, bd=1e9;
+    rings.forEach((r,i)=>{ const d=r.position.distanceTo(pos); if(d<bd){bd=d;best=i;} });
+    target = best;
+  }
+
+  function update(dt){
+    if (running && !over){
+      // 입력
+      const turn = (keys.KeyA||keys.ArrowLeft?1:0) - (keys.KeyD||keys.ArrowRight?1:0);
+      const lift = (keys.KeyS||keys.ArrowDown?1:0) - (keys.KeyW||keys.ArrowUp?1:0); // S = 기수 올리기
+      yaw += turn * 1.4 * dt;
+      pitch += lift * 1.2 * dt;
+      pitch = Math.max(-1.0, Math.min(1.0, pitch));
+      if (!lift) pitch *= (1 - Math.min(1, dt*0.8));
+      const rollTarget = turn * 0.7;
+      roll += (rollTarget - roll) * Math.min(1, dt*5);
+
+      const boost = keys.ShiftLeft||keys.ShiftRight, brake = keys.Space;
+      const targetSpeed = boost ? 95 : brake ? 22 : 50;
+      speed += (targetSpeed - speed) * Math.min(1, dt*1.5);
+
+      const fwd = tmp.set(-Math.sin(yaw)*Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw)*Math.cos(pitch));
+      pos.addScaledVector(fwd, speed*dt);
+
+      // 충돌
+      if (pos.y < 2.5){ pos.y = 2.5; crash('ground'); }
+      if (pos.y > 380) { pos.y = 380; pitch = Math.min(pitch, 0); }
+      for (const b of buildings){
+        if (pos.y < b.h+1.5 && pos.x>b.minX-2 && pos.x<b.maxX+2 && pos.z>b.minZ-2 && pos.z<b.maxZ+2){ crash('building'); break; }
+      }
+      // 맵 경계: 반대편으로 되돌림
+      const lim = AREA*1.4;
+      if (Math.abs(pos.x)>lim) pos.x = -Math.sign(pos.x)*lim*0.98;
+      if (Math.abs(pos.z)>lim) pos.z = -Math.sign(pos.z)*lim*0.98;
+
+      invuln = Math.max(0, invuln-dt);
+
+      // 링 통과
+      for (let i=0;i<rings.length;i++){
+        if (rings[i].position.distanceTo(pos) < RING_R-1.5){
+          score++; timeLeft += 8;
+          rings[i].position.copy(freeSpot());
+          rings[i].rotation.y = Math.random()*Math.PI;
+          flash.style.background='gold'; flash.style.opacity=0.35;
+          setTimeout(()=>{flash.style.opacity=0; flash.style.background='red';},150);
+        }
+      }
+
+      timeLeft -= dt;
+      if (timeLeft <= 0){
+        timeLeft = 0; over = true;
+        msg.innerHTML = '<h1>게임 종료!</h1><p>통과한 링: <b style="color:#ffd54a;font-size:28px">'+score+'</b> 개</p><button id="again">다시 하기 (R)</button>';
+        msg.style.display='flex';
+        $('again').onclick = ()=>{ reset(); };
+      }
+    }
+
+    // 링 색/회전
+    pickTarget();
+    rings.forEach((r,i)=>{
+      r.material = (i===target)? hotMat : dimMat;
+      r.scale.setScalar(i===target ? 1+0.06*Math.sin(performance.now()/150) : 1);
+    });
+
+    // 자동차 자세
+    car.position.copy(pos);
+    car.rotation.set(pitch, yaw, roll, 'YXZ');
+    const fl = 0.8 + (speed/95)*1.6 + Math.random()*0.3;
+    flames.forEach(f=>{ f.scale.y = fl; f.position.z = 2.4 + fl; });
+    car.visible = !(invuln>0 && Math.floor(performance.now()/90)%2===0);
+
+    // 추적 카메라
+    const back = new THREE.Vector3(Math.sin(yaw)*Math.cos(pitch*0.5), -Math.sin(pitch*0.5), Math.cos(yaw)*Math.cos(pitch*0.5));
+    const desired = pos.clone().addScaledVector(back, 16 + speed*0.06).add(new THREE.Vector3(0,5.5,0));
+    camera.position.lerp(desired, Math.min(1, dt*5));
+    camera.lookAt(pos.x - Math.sin(yaw)*10, pos.y + 1 + Math.sin(pitch)*8, pos.z - Math.cos(yaw)*10);
+    camera.fov += ((70 + (speed-50)*0.25) - camera.fov) * Math.min(1, dt*3);
+    camera.updateProjectionMatrix();
+
+    // HUD
+    $('score').textContent = score;
+    $('time').textContent = Math.ceil(timeLeft);
+    $('speed').textContent = Math.round(speed*3.6);
+    $('alt').textContent = Math.round(pos.y);
+
+    // 방향 화살표 (다음 링)
+    const tp = rings[target].position.clone().project(camera);
+    const arrow = $('arrow');
+    const behind = tp.z > 1;
+    let ax = tp.x, ay = tp.y;
+    if (behind){ ax = -ax; ay = -ay; }
+    const onScreen = !behind && Math.abs(ax)<0.9 && Math.abs(ay)<0.9;
+    arrow.style.opacity = (running && !onScreen) ? 1 : 0;
+    arrow.style.transform = 'rotate(' + Math.atan2(ax, ay) + 'rad)';
+  }
+
+  function loop(){
+    requestAnimationFrame(loop);
+    const dt = Math.min(clock.getDelta(), 0.05);
+    update(dt);
+    renderer.render(scene, camera);
+  }
+  camera.position.set(0,46,18);
+  loop();
+})();
+</script>
+</body>
+</html>
